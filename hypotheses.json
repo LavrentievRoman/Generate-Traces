@@ -1,0 +1,81 @@
+{
+  "task": "Последовательное определение модели потока по неизвестной трассе",
+  "method": "sequential_H1_to_H5_with_abstention",
+  "data_policy": {
+    "used_column": "event_time",
+    "excluded_columns": [
+      "interarrival_time",
+      "state_after_event"
+    ],
+    "original_generation_parameters_known": false,
+    "file_name_used_for_classification": false
+  },
+  "common_tests": {
+    "independence": {
+      "name": "Ljung-Box",
+      "lags": 10,
+      "alpha": 0.05,
+      "interpretation": "p >= 0.05: независимость не отвергнута, но не доказана"
+    },
+    "distribution_fit": {
+      "name": "parametric bootstrap Kolmogorov-Smirnov",
+      "replicates": 99,
+      "alpha": 0.05
+    },
+    "comparison": {
+      "name": "BIC",
+      "formula": "BIC = k*ln(n) - 2*logLmax",
+      "min_advantage": 10,
+      "meaning": "практический порог убедительного преимущества"
+    }
+  },
+  "hypotheses": [
+    {
+      "id": "H1",
+      "model": "gamma_renewal",
+      "statement": "Независимые интервалы имеют Gamma-распределение с неизвестными формой и масштабом.",
+      "test": "p_LB>=0.05 AND bootstrap_KS_p_Gamma>=0.05 AND BIC_Weibull-BIC_Gamma>=10",
+      "if_true": "gamma_renewal",
+      "if_false": "H2"
+    },
+    {
+      "id": "H2",
+      "model": "weibull_renewal",
+      "statement": "Независимые интервалы имеют Weibull-распределение с неизвестными формой и масштабом.",
+      "test": "p_LB>=0.05 AND bootstrap_KS_p_Weibull>=0.05 AND BIC_Gamma-BIC_Weibull>=10",
+      "if_true": "weibull_renewal",
+      "if_false": "H3"
+    },
+    {
+      "id": "H3",
+      "model": "mmpp_2",
+      "statement": "Зависимый поток описывается MMPP(2) с неизвестными 4 скоростями.",
+      "test": "p_LB<0.05 AND min(BIC_MMPP3,BIC_MAP2)-BIC_MMPP2>=10",
+      "if_true": "mmpp_2",
+      "if_false": "H4"
+    },
+    {
+      "id": "H4",
+      "model": "mmpp_3",
+      "statement": "Зависимый поток описывается циклическим MMPP(3) с неизвестными 6 скоростями.",
+      "test": "p_LB<0.05 AND min(BIC_MMPP2,BIC_MAP2)-BIC_MMPP3>=10",
+      "if_true": "mmpp_3",
+      "if_false": "H5"
+    },
+    {
+      "id": "H5",
+      "model": "map_2",
+      "statement": "Зависимый поток описывается MAP(2) с неизвестными матрицами D0, D1.",
+      "test": "p_LB<0.05 AND min(BIC_MMPP2,BIC_MMPP3)-BIC_MAP2>=10",
+      "if_true": "map_2",
+      "if_false": "undetermined"
+    }
+  ],
+  "interpretation": "При первом успешном тесте алгоритм останавливается. При отсутствии подтверждения всех гипотез вывод «неопределённо», а не угадывание H5. Гипотезы определяют взаимоисключающие решения, но не непересекающиеся математические семейства распределений.",
+  "identifiability_limitations": [
+    "Gamma(shape=1) совпадает с Weibull(shape=1) при одинаковом масштабе: экспоненциальный закон.",
+    "MMPP(2) является частным случаем MAP(2) при диагональной матрице D1.",
+    "Если интенсивности всех состояний MMPP совпадают, наблюдается обычный пуассоновский поток.",
+    "Проверки по конечной трассе имеют вероятность ошибок первого и второго рода."
+  ]
+}

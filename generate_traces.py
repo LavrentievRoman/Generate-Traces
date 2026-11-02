@@ -1,5 +1,4 @@
 """Генерация пяти моделей потоков событий.
-
 Во всех CSV:
     event_id            -- номер события (начиная с 1)
     event_time          -- время события от t=0
@@ -15,34 +14,38 @@ from pathlib import Path
 import numpy as np
 
 
-# Параметры подобраны так, чтобы средняя интенсивность всех потоков
-# была приблизительно равна одному событию за единицу времени.
-PARAMS = {
-    "gamma_renewal": {
-        "shape": 2.5,       # k: форма гамма-распределения
-        "scale": 0.4,       # theta: масштаб, E[T] = k * theta = 1
-    },
-    "weibull_renewal": {
-        "shape": 0.75,      # k: форма (< 1 -- убывающая функция риска)
-        "scale": 1.0 / math.gamma(1.0 + 1.0 / 0.75),
-    },
-    "mmpp_2": {
-        "lambda_1": 0.30, "lambda_2": 2.05,
-        "q_12": 0.08, "q_21": 0.12,
-    },
-    "mmpp_3": {  # 6 параметров: три интенсивности и три перехода по циклу
-        "lambda_1": 0.25, "lambda_2": 0.90, "lambda_3": 1.60,
-        "q_12": 0.08, "q_23": 0.12, "q_31": 0.06,
-    },
-    "map_2": {
-        # q_ij -- невидимый переход фазы без события
-        # r_ij -- событие, после которого фаза становится j
-        "q_12": 0.05, "q_21": 0.08,
-        "r_11": 0.25, "r_12": 0.12,
-        "r_21": 0.09, "r_22": 1.50,
-    },
-}
-MODEL_NAMES = tuple(PARAMS)
+# Параметры генерации намеренно хранятся отдельно от кода.
+# Анализатор НЕ загружает этот файл и оценивает параметры только по трассам.
+MODEL_NAMES = ("gamma_renewal", "weibull_renewal", "mmpp_2", "mmpp_3", "map_2")
+
+
+def load_parameters(path):
+    """Читает единственный источник параметров из JSON и проверяет структуру."""
+    import json
+    with Path(path).open(encoding="utf-8") as fh:
+        params = json.load(fh)
+    if not isinstance(params, dict) or set(params) != set(MODEL_NAMES):
+        raise ValueError("JSON должен содержать параметры ровно пяти моделей: "
+                         + ", ".join(MODEL_NAMES))
+    keys = {
+        "gamma_renewal": {"shape", "scale"},
+        "weibull_renewal": {"shape", "scale"},
+        "mmpp_2": {"lambda_1", "lambda_2", "q_12", "q_21"},
+        "mmpp_3": {"lambda_1", "lambda_2", "lambda_3", "q_12", "q_23", "q_31"},
+        "map_2": {"q_12", "q_21", "r_11", "r_12", "r_21", "r_22"},
+    }
+    for name, required in keys.items():
+        if set(params[name]) != required:
+            raise ValueError(f"{name}: ожидаются поля {sorted(required)}")
+        for key, value in params[name].items():
+            if type(value) not in (float, int) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name}.{key}: требуется положительное число")
+    return params
+
+
+# Для обратной совместимости с небольшими тестами оставлен этот атрибут.
+# При использовании как скрипта параметры перечитываются из --config.
+PARAMS = load_parameters(Path(__file__).resolve().parent / "model_parameters.json")
 
 
 def stationary_two_state(rate_12, rate_21):
@@ -93,13 +96,12 @@ def simulate_markov_arrivals(n, rng, stationary, transitions):
     while saved < n:
         total, cumulative, options = compiled[state]
         clock += float(rng.exponential(scale=1.0 / total))
-        # Выбор одного из конкурирующих экспоненциальных механизмов.
         choice = int(np.searchsorted(cumulative, rng.random() * total, side="right"))
         _, next_state, is_arrival = options[choice]
         state = next_state
         if is_arrival:
             times[saved] = clock
-            phases[saved] = state + 1  # нумерация состояний в файлах: 1, 2, 3
+            phases[saved] = state + 1
             saved += 1
 
     intervals = np.diff(np.concatenate(([0.0], times)))
@@ -118,8 +120,6 @@ def mmpp_2(n, rng, p):
 
 def mmpp_3(n, rng, p):
     """Трёхфазный MMPP с циклом 1 -> 2 -> 3 -> 1 (шесть параметров)."""
-    # В цикле стационарный поток переходов одинаков в каждом звене:
-    # pi_1*q_12 = pi_2*q_23 = pi_3*q_31.
     holding = np.array([1.0 / p["q_12"], 1.0 / p["q_23"],
                         1.0 / p["q_31"]])
     pi = holding / holding.sum()
@@ -132,13 +132,7 @@ def mmpp_3(n, rng, p):
 
 
 def map_matrices(p):
-    """Матрицы MAP: D0 -- без события, D1 -- с событием.
-
-    D0 = [[-(q12+r11+r12), q12],
-          [q21, -(q21+r21+r22)]]
-    D1 = [[r11, r12], [r21, r22]]
-    Q = D0 + D1 -- генератор фоновой марковской цепи.
-    """
+    """Матрицы MAP: D0 -- без события, D1 -- с событием."""
     d0 = np.array([
         [-(p["q_12"] + p["r_11"] + p["r_12"]), p["q_12"]],
         [p["q_21"], -(p["q_21"] + p["r_21"] + p["r_22"])],
@@ -157,7 +151,6 @@ def map_2(n, rng, p):
     if not np.allclose(q.sum(axis=1), 0.0):
         raise ValueError("Некорректные матрицы MAP: суммы строк D0+D1 не ноль")
 
-    # Стационарное распределение непрерывной фоновой цепи Q.
     pi = stationary_two_state(q[0, 1], q[1, 0])
     transitions = [
         [(p["q_12"], 1, False), (p["r_11"], 0, True),
@@ -199,11 +192,20 @@ def theory(name, p):
 def save_csv(path, times, intervals, states):
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
-        writer.writerow(["event_id", "event_time", "interarrival_time",
-                         "state_after_event"])
-        for i, (t, dt) in enumerate(zip(times, intervals), start=1):
-            st = "" if states is None else int(states[i - 1])
-            writer.writerow([i, f"{t:.12f}", f"{dt:.12f}", st])
+        writer.writerow([
+            "event_id",
+            "event_time",
+            "interarrival_time"
+        ])
+
+        for i, (t, dt) in enumerate(
+            zip(times, intervals), start=1
+        ):
+            writer.writerow([
+                i,
+                f"{t:.12f}",
+                f"{dt:.12f}"
+            ])
 
 
 def get_statistics(name, times, intervals, states, params, seed):
@@ -275,6 +277,9 @@ def create_plot(traces, path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path,
+                        default=Path(__file__).resolve().parent / "model_parameters.json",
+                        help="параметры генерации (JSON)")
     parser.add_argument("--n", type=int, default=10000,
                         help="число событий для каждой модели (по умолчанию 10000)")
     parser.add_argument("--seed", type=int, default=2026,
@@ -284,6 +289,7 @@ def main():
     parser.add_argument("--plots", action="store_true",
                         help="дополнительно построить рисунок эмпирических CDF")
     args = parser.parse_args()
+    params = load_parameters(args.config)
     if args.n < 3:
         parser.error("--n должен быть не меньше 3")
 
@@ -301,7 +307,7 @@ def main():
     for index, name in enumerate(MODEL_NAMES):
         model_seed = args.seed + 1000 * index
         rng = np.random.default_rng(model_seed)
-        p = PARAMS[name]
+        p = params[name]
         times, intervals, states = simulators[name](args.n, rng, p)
         save_csv(args.outdir / "traces" / f"{name}.csv", times, intervals, states)
         stats = get_statistics(name, times, intervals, states, p, model_seed)
